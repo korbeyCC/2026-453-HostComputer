@@ -1,0 +1,15 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller intermediate build files
+build/
+
+# Temporary files & OS junk
+*.tmp
+*.temp
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
