@@ -33,12 +33,15 @@ class RealtimePlotter(tk.Canvas):
         
         self.visible_curves = {
             'diff': True,
-            'halls': False,
-            'speeds': False,
+            'halls': True,
+            'speeds': True,
             'currents': False
         }
         
-        self.max_sync_limit_hall = 750
+        self.counts_per_mm = 112.5 # 减速比30 * 霍尔系数30 / 导程8mm = 112.5 counts/mm
+        self.user_diff_limit_mm = 5.0 # 误差量程 (mm)，默认 5.0mm
+        self.user_diff_limit = int(round(5.0 * 112.5)) # 自动换算后的 counts (5.0 * 112.5 = 563c)
+        self.max_sync_limit_hall = 563
         self.max_speed_limit_rpm = 3000.0
         self.max_current_limit_deciA = 500.0
         
@@ -53,14 +56,24 @@ class RealtimePlotter(tk.Canvas):
         self.visible_curves[curve_key] = is_visible
         self.redraw()
         
+    def set_diff_limit_mm(self, limit_mm):
+        try:
+            val = float(limit_mm)
+            if val > 0:
+                self.user_diff_limit_mm = val
+                self.user_diff_limit = max(1, int(round(val * self.counts_per_mm)))
+                self.redraw()
+                return self.user_diff_limit
+        except Exception:
+            pass
+        return None
+            
     def add_points_batch(self, points_batch):
         """批量推送数据点"""
         if self.paused or not points_batch:
             return
             
         for t_ms, data_dict in points_batch:
-            if 'max_sync_diff_hall' in data_dict and data_dict['max_sync_diff_hall'] > 0:
-                self.max_sync_limit_hall = data_dict['max_sync_diff_hall']
             self.data_buffer.append((t_ms, data_dict))
             
         # O(1) 弹出过期的头部节点
@@ -79,7 +92,7 @@ class RealtimePlotter(tk.Canvas):
         if width < 70 or height < 50:
             return
             
-        pad_left = 75
+        pad_left = 90
         pad_right = 75
         pad_top = 35
         pad_bottom = 40
@@ -91,41 +104,84 @@ class RealtimePlotter(tk.Canvas):
         self.create_rectangle(pad_left, pad_top, pad_left + plot_width, pad_top + plot_height, 
                                fill=self.bg_color, outline="#2A2A35", width=1.5)
         
-        limit_hall = self.max_sync_limit_hall if self.max_sync_limit_hall > 0 else 750
+        limit_hall = self.user_diff_limit if self.user_diff_limit > 0 else int(round(5.0 * self.counts_per_mm))
+        limit_mm = self.user_diff_limit_mm if self.user_diff_limit_mm > 0 else (limit_hall / self.counts_per_mm)
         limit_rpm = int(self.max_speed_limit_rpm)
         limit_curr = self.max_current_limit_deciA / 100.0
         
+        y_mid = pad_top + plot_height / 2.0
+        half_height = plot_height / 2.0
+        
+        # 相对平均高度的高度差 Y 坐标转换函数 (+limit 对应画布顶部，-limit 对应画布底部，0 对应中心横线)
+        def diff_to_y(d_val):
+            ratio = float(d_val) / float(limit_hall)
+            ratio_clamped = max(min(ratio, 1.25), -1.25)
+            return y_mid - (ratio_clamped * half_height)
+            
+        # 速度/电流 0~1.0 全高 Y 坐标转换函数 (底部 0，顶部满量程)
         def ratio_to_y(ratio):
             ratio_clamped = max(min(ratio, 1.2), -0.2)
             return pad_top + plot_height - (ratio_clamped * plot_height)
             
+        # 计算当前窗口最新数据帧的平均高度 (用于实时更新中间横线数值)
+        latest_avg_h = 0.0
+        if self.data_buffer:
+            _, latest_d = self.data_buffer[-1]
+            if 'halls' in latest_d and len(latest_d['halls']) >= 4:
+                latest_avg_h = sum(latest_d['halls'][:4]) / 4.0
+            elif 'H0' in latest_d:
+                h_vals = [latest_d.get(f'H{i}', 0) for i in range(4)]
+                latest_avg_h = sum(h_vals) / 4.0
+            
         # 2. 刻度与标注
-        self.create_text(pad_left - 10, pad_top, text=f"{limit_hall}c", fill="#10B981", anchor="e", font=("Consolas", 8, "bold"))
-        self.create_text(pad_left - 10, pad_top + 12, text=f"({limit_hall/150.0:.1f}mm)", fill="#8E9297", anchor="e", font=("Consolas", 7))
-        self.create_text(pad_left - 10, pad_top + plot_height/2, text=f"{limit_hall//2}c", fill="#8E9297", anchor="e", font=("Consolas", 8))
-        self.create_text(pad_left - 10, pad_top + plot_height, text="0c (0mm)", fill=self.target_color, anchor="e", font=("Consolas", 8, "bold"))
+        is_halls_visible = self.visible_curves.get('halls', False)
         
+        # 左侧 Y 轴刻度 (以 mm 为主，附带 counts 换算值)
+        self.create_text(pad_left - 10, pad_top, text=f"+{limit_mm:.1f}mm", fill="#10B981", anchor="e", font=("Consolas", 8, "bold"))
+        self.create_text(pad_left - 10, pad_top + 12, text=f"(+{limit_hall}c)", fill="#8E9297", anchor="e", font=("Consolas", 7))
+        
+        if is_halls_visible:
+            self.create_text(pad_left - 10, y_mid - 6, text="±0mm", fill="#00ADB5", anchor="e", font=("Consolas", 8, "bold"))
+            self.create_text(pad_left - 10, y_mid + 7, text=f"Avg:{int(latest_avg_h)}c", fill="#00ADB5", anchor="e", font=("Consolas", 7))
+        else:
+            self.create_text(pad_left - 10, y_mid, text="0mm (0c)", fill="#8E9297", anchor="e", font=("Consolas", 8))
+            
+        self.create_text(pad_left - 10, pad_top + plot_height - 12, text=f"-{limit_mm:.1f}mm", fill="#10B981", anchor="e", font=("Consolas", 8, "bold"))
+        self.create_text(pad_left - 10, pad_top + plot_height, text=f"(-{limit_hall}c)", fill="#8E9297", anchor="e", font=("Consolas", 7))
+        
+        # 右侧 Y 轴刻度 (转速/电流，底端 0，顶端满量程)
         self.create_text(pad_left + plot_width + 10, pad_top, text=f"{limit_rpm}RPM", fill="#3B82F6", anchor="w", font=("Consolas", 8, "bold"))
         self.create_text(pad_left + plot_width + 10, pad_top + 12, text=f"({limit_curr:.1f}A)", fill="#EAB308", anchor="w", font=("Consolas", 7))
-        self.create_text(pad_left + plot_width + 10, pad_top + plot_height/2, text=f"{limit_rpm//2}RPM", fill="#8E9297", anchor="w", font=("Consolas", 8))
+        self.create_text(pad_left + plot_width + 10, y_mid, text=f"{limit_rpm//2}RPM", fill="#8E9297", anchor="w", font=("Consolas", 8))
         self.create_text(pad_left + plot_width + 10, pad_top + plot_height, text="0 RPM/A", fill=self.target_color, anchor="w", font=("Consolas", 8, "bold"))
         
-        # 水平网格
-        y_zero = ratio_to_y(0.0)
-        self.create_line(pad_left, y_zero, pad_left + plot_width, y_zero, fill=self.target_color, width=1.5, dash=(4, 3))
+        # 3. 水平网格线与固定在中间的平均高度中轴横线
+        if is_halls_visible:
+            # 仅在勾选“4轴高度差”时显示青色中轴横线与平均高度动态文字
+            self.create_line(pad_left, y_mid, pad_left + plot_width, y_mid, fill="#00ADB5", width=1.8, dash=(6, 4))
+            self.create_text(pad_left + 15, y_mid - 12, 
+                             text=f"── 平均高度基准中轴线 Avg: {latest_avg_h:.0f}c ({latest_avg_h/self.counts_per_mm:.1f}mm) ──", 
+                             fill="#00ADB5", anchor="w", font=("Consolas", 8, "bold"))
+        else:
+            # 未勾选时，作为普通低亮网格辅助虚线
+            self.create_line(pad_left, y_mid, pad_left + plot_width, y_mid, fill=self.grid_color, dash=(2, 2))
         
-        y_mid = ratio_to_y(0.5)
-        self.create_line(pad_left, y_mid, pad_left + plot_width, y_mid, fill=self.grid_color, dash=(2, 2))
+        # 上下 1/2 差值辅助网格线
+        y_quarter_top = pad_top + half_height * 0.5
+        y_quarter_btm = pad_top + half_height * 1.5
+        self.create_line(pad_left, y_quarter_top, pad_left + plot_width, y_quarter_top, fill=self.grid_color, dash=(2, 2))
+        self.create_line(pad_left, y_quarter_btm, pad_left + plot_width, y_quarter_btm, fill=self.grid_color, dash=(2, 2))
         
-        y_top = ratio_to_y(1.0)
-        self.create_line(pad_left, y_top, pad_left + plot_width, y_top, fill=self.grid_color, dash=(2, 2))
+        # 底部和顶部网格线
+        self.create_line(pad_left, pad_top, pad_left + plot_width, pad_top, fill=self.grid_color, dash=(2, 2))
+        self.create_line(pad_left, pad_top + plot_height, pad_left + plot_width, pad_top + plot_height, fill=self.target_color, width=1.2, dash=(4, 3))
         
         if not self.data_buffer:
-            self.create_text(pad_left + plot_width/2, pad_top + plot_height/2, 
+            self.create_text(pad_left + plot_width/2, y_mid, 
                              text="等待数据流输入...", fill="#5E6268", font=("Segoe UI", 10))
             return
             
-        # 3. 窗口范围
+        # 4. 时间轴范围
         t_latest = self.data_buffer[-1][0]
         x_max = t_latest
         x_min = t_latest - self.window_size_ms
@@ -144,7 +200,7 @@ class RealtimePlotter(tk.Canvas):
         if not window_points:
             return
             
-        # A. 4轴转速 (虚线)
+        # A. 4轴转速 (虚线，对应右侧 Y 轴)
         if self.visible_curves['speeds']:
             for ch in range(4):
                 pts = []
@@ -157,7 +213,7 @@ class RealtimePlotter(tk.Canvas):
                 if len(pts) >= 4:
                     self.create_line(pts, fill=self.axis_colors[ch], width=1.5, dash=(4, 2))
                     
-        # B. 4轴电流 (点虚线)
+        # B. 4轴电流 (点虚线，对应右侧 Y 轴)
         if self.visible_curves['currents']:
             for ch in range(4):
                 pts = []
@@ -170,21 +226,22 @@ class RealtimePlotter(tk.Canvas):
                 if len(pts) >= 4:
                     self.create_line(pts, fill=self.axis_colors[ch], width=1.2, dash=(1, 3))
                     
-        # C. 4轴绝对高度/伸出长度 (细实线)
+        # C. 4轴高度差 (H0~H3 围绕中间平均高度缠绕穿梭，粗实线)
         if self.visible_curves['halls']:
-            max_travel_limit = 300000.0 # 2000mm 满行程基准 (300000 counts)
             for ch in range(4):
                 pts = []
                 for t_ms, d in window_points:
-                    h_val = d.get(f'H{ch}', 0)
                     if 'halls' in d and len(d['halls']) > ch:
-                        h_val = d['halls'][ch]
-                    ratio = float(h_val) / max_travel_limit
-                    pts.extend([time_to_x(t_ms), ratio_to_y(ratio)])
+                        h_vals = d['halls'][:4]
+                    else:
+                        h_vals = [d.get(f'H{i}', 0) for i in range(4)]
+                    point_avg = sum(h_vals) / 4.0
+                    diff_h = h_vals[ch] - point_avg # 相对当前时刻平均高度的差值！
+                    pts.extend([time_to_x(t_ms), diff_to_y(diff_h)])
                 if len(pts) >= 4:
-                    self.create_line(pts, fill=self.axis_colors[ch], width=1.5)
+                    self.create_line(pts, fill=self.axis_colors[ch], width=2.0)
                     
-        # D. 同步差值 MaxDiff 曲线 (荧光绿粗实线)
+        # D. 同步差值 MaxDiff 曲线 (荧光绿粗实线，以中轴 0 偏差线向上升起)
         if self.visible_curves['diff']:
             pts = []
             for t_ms, d in window_points:
@@ -192,17 +249,17 @@ class RealtimePlotter(tk.Canvas):
                 if 'diff' not in d:
                     h_vals = [d[k] for k in ['H0', 'H1', 'H2', 'H3'] if k in d]
                     diff_val = (max(h_vals) - min(h_vals)) if len(h_vals) >= 2 else 0.0
-                ratio = float(diff_val) / float(limit_hall)
-                pts.extend([time_to_x(t_ms), ratio_to_y(ratio)])
+                pts.extend([time_to_x(t_ms), diff_to_y(diff_val)])
             if len(pts) >= 4:
-                self.create_line(pts, fill=self.diff_color, width=2.5)
+                self.create_line(pts, fill=self.diff_color, width=2.2)
 
         # 图例
         self.create_line(pad_left + 10, pad_top - 18, pad_left + 25, pad_top - 18, fill=self.diff_color, width=2.5)
         self.create_text(pad_left + 30, pad_top - 18, text="同步差值(MaxDiff)", fill=self.diff_color, anchor="w", font=("Segoe UI", 8))
         
-        self.create_line(pad_left + 160, pad_top - 18, pad_left + 175, pad_top - 18, fill=self.target_color, width=1.5, dash=(4, 3))
-        self.create_text(pad_left + 180, pad_top - 18, text="基准0位", fill=self.target_color, anchor="w", font=("Segoe UI", 8))
+        if is_halls_visible:
+            self.create_line(pad_left + 155, pad_top - 18, pad_left + 175, pad_top - 18, fill="#00ADB5", width=1.8, dash=(6, 4))
+            self.create_text(pad_left + 180, pad_top - 18, text="平均高度中轴", fill="#00ADB5", anchor="w", font=("Segoe UI", 8))
 
         # 4轴全通道电机颜色对应表彩色小提示
         rx = pad_left + plot_width
@@ -223,7 +280,7 @@ class RealtimePlotter(tk.Canvas):
 class ModernPIDAnalyzerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("2026-273 升降同步监控上位机 (60 FPS 电竞级极速版)")
+        self.root.title("2026-453/273 升降同步监控上位机 (60 FPS 电竞级极速版)")
         self.root.geometry("1150x680")
         self.root.configure(bg="#121214")
         
@@ -279,7 +336,7 @@ class ModernPIDAnalyzerApp:
         top_bar = ttk.Frame(self.root, style='Card.TFrame')
         top_bar.pack(fill="x", padx=10, pady=5)
         
-        title_lbl = ttk.Label(top_bar, text="★ 2026-273 MULTI-AXIS SYNC MONITOR (60 FPS ULTRA) ★", style='Title.TLabel', font=("Segoe UI", 11, "bold"))
+        title_lbl = ttk.Label(top_bar, text="★ 2026-453/273 MULTI-AXIS SYNC MONITOR (60 FPS ULTRA) ★", style='Title.TLabel', font=("Segoe UI", 11, "bold"))
         title_lbl.pack(side="left", padx=15, pady=10)
         
         self.conn_status_lbl = ttk.Label(top_bar, text="未连接", background="#1E1E24", foreground="#EF4444", font=("Segoe UI", 10, "bold"))
@@ -363,9 +420,27 @@ class ModernPIDAnalyzerApp:
         self.var_currents = tk.BooleanVar(value=False)
         
         ttk.Checkbutton(curve_opt_bar, text="轴间差值(Diff)", variable=self.var_diff, command=self.on_curve_opt_change).pack(side="left", padx=5)
-        ttk.Checkbutton(curve_opt_bar, text="4轴高度(H0~H3)", variable=self.var_halls, command=self.on_curve_opt_change).pack(side="left", padx=5)
+        ttk.Checkbutton(curve_opt_bar, text="4轴高度差(H0~H3)", variable=self.var_halls, command=self.on_curve_opt_change).pack(side="left", padx=5)
         ttk.Checkbutton(curve_opt_bar, text="4轴转速(V0~V3)", variable=self.var_speeds, command=self.on_curve_opt_change).pack(side="left", padx=5)
         ttk.Checkbutton(curve_opt_bar, text="4轴电流(I0~I3)", variable=self.var_currents, command=self.on_curve_opt_change).pack(side="left", padx=5)
+        
+        ttk.Label(curve_opt_bar, text="| 误差量程:", foreground="#8E9297", font=("Segoe UI", 9)).pack(side="left", padx=(10, 2))
+        self.entry_diff_limit = ttk.Entry(curve_opt_bar, width=5, justify="center", font=("Consolas", 9, "bold"))
+        self.entry_diff_limit.insert(0, "5.0")
+        self.entry_diff_limit.pack(side="left", padx=(0, 2))
+        ttk.Label(curve_opt_bar, text="mm", foreground="#8E9297", font=("Segoe UI", 9)).pack(side="left", padx=(0, 2))
+        
+        self.lbl_limit_calc = ttk.Label(curve_opt_bar, text="(=563c)", foreground="#6B7280", font=("Consolas", 8))
+        self.lbl_limit_calc.pack(side="left", padx=(0, 5))
+        
+        def on_diff_limit_change(event=None):
+            val_str = self.entry_diff_limit.get().strip()
+            calc_c = self.plotter.set_diff_limit_mm(val_str)
+            if calc_c is not None:
+                self.lbl_limit_calc.configure(text=f"(={calc_c}c)")
+                
+        self.entry_diff_limit.bind("<Return>", on_diff_limit_change)
+        self.entry_diff_limit.bind("<FocusOut>", on_diff_limit_change)
         
         # 4轴全通道电机颜色对应表彩色提示框架
         legend_frame = ttk.Frame(curve_opt_bar, style='TFrame')

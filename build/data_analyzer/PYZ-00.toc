@@ -1,4 +1,4 @@
-('E:\\KaiFa\\2026-273\\上位机\\build\\data_analyzer\\PYZ-00.pyz',
+('E:\\KaiFa\\2026-453\\上位机\\build\\data_analyzer\\PYZ-00.pyz',
  [('__future__', 'D:\\Miniconda\\Lib\\__future__.py', 'PYMODULE'),
   ('_colorize', 'D:\\Miniconda\\Lib\\_colorize.py', 'PYMODULE'),
   ('_compat_pickle', 'D:\\Miniconda\\Lib\\_compat_pickle.py', 'PYMODULE'),
