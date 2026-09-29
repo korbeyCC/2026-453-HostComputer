@@ -384,9 +384,9 @@ class ModernPIDAnalyzerApp:
         metrics_frame.pack(fill="both", expand=True, padx=15, pady=2)
         
         self.metric_target = self.create_metric_row(metrics_frame, "目标差值:", "0", "#3B82F6")
-        self.metric_current_diff = self.create_metric_row(metrics_frame, "当前差值 (Current):", "0", "#10B981")
-        self.metric_max_sync_diff = self.create_metric_row(metrics_frame, "最大差值 (Peak):", "0", "#EF4444")
-        self.metric_status = self.create_metric_row(metrics_frame, "运行状态:", "待命", "#EEEEEE")
+        self.metric_current_diff = self.create_metric_row(metrics_frame, "当前差值 (Current):", "0 (0%)", "#10B981")
+        self.metric_max_sync_diff = self.create_metric_row(metrics_frame, "最大差值 (Peak):", "0 (0%)", "#10B981")
+        self.metric_status = self.create_metric_row(metrics_frame, "运行状态:", "待命", "#10B981")
         
         # 一键清空主按钮 (波形 -> Peak -> 日志)
         self.btn_clear_all = ttk.Button(ana_card, text="一键清空 (波形/Peak/日志)", style='Reset.TButton', command=self.clear_all)
@@ -576,7 +576,7 @@ class ModernPIDAnalyzerApp:
 
     def reset_metrics(self):
         self.peak_sync_error = 0.0
-        self.metric_max_sync_diff.configure(text="0")
+        self.metric_max_sync_diff.configure(text="0 (0%)", foreground="#10B981")
         self.log_message("[系统] 最大差值 Peak 峰值监控已重置。", "sys")
 
     def clear_all(self):
@@ -586,7 +586,7 @@ class ModernPIDAnalyzerApp:
         
         # 2. 然后重置 Peak 峰值
         self.peak_sync_error = 0.0
-        self.metric_max_sync_diff.configure(text="0")
+        self.metric_max_sync_diff.configure(text="0 (0%)", foreground="#10B981")
         
         # 3. 最后清空日志窗口
         self.log_txt.delete('1.0', tk.END)
@@ -645,8 +645,15 @@ class ModernPIDAnalyzerApp:
                     
                     if diff_val > self.peak_sync_error:
                         self.peak_sync_error = diff_val
-                        peak_pct = (self.peak_sync_error / float(limit_val) * 100.0) if limit_val > 0 else 0.0
-                        self.metric_max_sync_diff.configure(text=f"{int(self.peak_sync_error)} ({peak_pct:.0f}%)")
+                        
+                    peak_pct = (self.peak_sync_error / float(limit_val) * 100.0) if limit_val > 0 else 0.0
+                    if peak_pct > 60.0:
+                        peak_color = "#EF4444"
+                    elif peak_pct > 30.0:
+                        peak_color = "#FFC312"
+                    else:
+                        peak_color = "#10B981"
+                    self.metric_max_sync_diff.configure(text=f"{int(self.peak_sync_error)} ({peak_pct:.0f}%)", foreground=peak_color)
                         
                     step_code = latest_dict.get('step', 0)
                     fault_code = latest_dict.get('fault', 0)
