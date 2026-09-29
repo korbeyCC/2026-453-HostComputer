@@ -625,11 +625,28 @@ class ModernPIDAnalyzerApp:
                         h_vals = [latest_dict[k] for k in ['H0', 'H1', 'H2', 'H3'] if k in latest_dict]
                         diff_val = (max(h_vals) - min(h_vals)) if len(h_vals) >= 2 else 0.0
                         
-                    self.metric_current_diff.configure(text=f"{int(diff_val)}")
+                    limit_val = latest_dict.get('max_sync_diff_hall', 0)
+                    if not limit_val or limit_val <= 0:
+                        limit_val = getattr(self.plotter, 'diff_limit_counts', 2250)
+                    if not limit_val or limit_val <= 0:
+                        limit_val = 2250
+                        
+                    diff_pct = (diff_val / float(limit_val) * 100.0) if limit_val > 0 else 0.0
+                    
+                    # 按照 30% / 60% 动态阶梯色彩分级
+                    if diff_pct > 60.0:
+                        diff_color = "#EF4444"
+                    elif diff_pct > 30.0:
+                        diff_color = "#FFC312"
+                    else:
+                        diff_color = "#10B981"
+                        
+                    self.metric_current_diff.configure(text=f"{int(diff_val)} ({diff_pct:.0f}%)", foreground=diff_color)
                     
                     if diff_val > self.peak_sync_error:
                         self.peak_sync_error = diff_val
-                        self.metric_max_sync_diff.configure(text=f"{int(self.peak_sync_error)}")
+                        peak_pct = (self.peak_sync_error / float(limit_val) * 100.0) if limit_val > 0 else 0.0
+                        self.metric_max_sync_diff.configure(text=f"{int(self.peak_sync_error)} ({peak_pct:.0f}%)")
                         
                     step_code = latest_dict.get('step', 0)
                     fault_code = latest_dict.get('fault', 0)
@@ -637,14 +654,14 @@ class ModernPIDAnalyzerApp:
                     if fault_code != 0:
                         fault_map = {1: "过流堵转急停", 2: "通信中断急停", 3: "同步差超限急停"}
                         self.metric_status.configure(text=fault_map.get(fault_code, f"异常急停({fault_code})"), foreground="#EF4444")
-                    elif diff_val > 15:
-                        self.metric_status.configure(text="失步风险高", foreground="#EF4444")
-                    elif diff_val > 5:
-                        self.metric_status.configure(text="动态微调中", foreground="#FFC312")
-                    elif step_code in [4, 5, 6]:
-                        self.metric_status.configure(text="同步升降中", foreground="#10B981")
+                    elif diff_pct > 60.0:
+                        self.metric_status.configure(text=f"失步风险高 ({diff_pct:.0f}%)", foreground="#EF4444")
+                    elif diff_pct > 30.0:
+                        self.metric_status.configure(text=f"动态微调中 ({diff_pct:.0f}%)", foreground="#FFC312")
+                    elif step_code in [2, 4, 5, 6]:
+                        self.metric_status.configure(text=f"同步升降中 ({diff_pct:.0f}%)", foreground="#10B981")
                     else:
-                        self.metric_status.configure(text="就绪待命", foreground="#EEEEEE")
+                        self.metric_status.configure(text="就绪待命", foreground="#10B981")
                         
                 self.plotter.redraw()
                 
@@ -794,7 +811,13 @@ class ModernPIDAnalyzerApp:
                                                         stuck_flags[m_idx] = True
                                         self.prev_abs_halls_cache = abs_halls_curr
 
-                                        base_tag = "warn" if (sys_fault != 0 or max_diff > 15 or (e0+e1+e2+e3) > 0) else "info"
+                                        diff_ratio = (max_diff / float(limit_hall)) if limit_hall > 0 else 0.0
+                                        if sys_fault != 0 or diff_ratio > 0.60:
+                                            base_tag = "err"
+                                        elif diff_ratio > 0.30 or (e0 + e1 + e2 + e3) > 0:
+                                            base_tag = "warn"
+                                        else:
+                                            base_tag = "info"
                                         
                                         # 构造分段富文本：仅将采样停更掉帧的那个具体电机绝对伸出长度数值标亮紫色！
                                         time_str = time.strftime("[%H:%M:%S] ")
@@ -807,11 +830,11 @@ class ModernPIDAnalyzerApp:
                                             if m_idx < 3:
                                                 segments.append((",", base_tag))
                                                 
-                                        tail_str = f"], RawH:[{raw_h0},{raw_h1},{raw_h2},{raw_h3}], ΔH:[{dh0},{dh1},{dh2},{dh3}]) | MaxDiff:{max_diff}c (Limit:{limit_hall}c) | V:[{v0},{v1},{v2},{v3}]RPM | I:[{c0:.2f},{c1:.2f},{c2:.2f},{c3:.2f}]A | CommErr:[{e0},{e1},{e2},{e3}]\n"
+                                        tail_str = f"], RawH:[{raw_h0},{raw_h1},{raw_h2},{raw_h3}], ΔH:[{dh0},{dh1},{dh2},{dh3}]) | MaxDiff:{max_diff}c (Limit:{limit_hall}c, {diff_ratio*100:.0f}%) | V:[{v0},{v1},{v2},{v3}]RPM | I:[{c0:.2f},{c1:.2f},{c2:.2f},{c3:.2f}]A | CommErr:[{e0},{e1},{e2},{e3}]\n"
                                         segments.append((tail_str, base_tag))
 
-                                        # 高频数据日志或者关键故障/状态变动强制透传
-                                        if self.show_stream_log or sys_fault != 0 or max_diff > 15 or (e0+e1+e2+e3) > 0:
+                                        # 高频数据日志或者关键故障/状态变动(偏差>30%进入微调或异常)强制透传
+                                        if self.show_stream_log or sys_fault != 0 or diff_ratio > 0.30 or (e0 + e1 + e2 + e3) > 0:
                                             self.log_queue.put(segments)
                                         
                                         data_dict = {
