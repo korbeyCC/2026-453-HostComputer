@@ -115,13 +115,15 @@ class RealtimePlotter(tk.Canvas):
         # 相对平均高度的高度差 Y 坐标转换函数 (+limit 对应画布顶部，-limit 对应画布底部，0 对应中心横线)
         def diff_to_y(d_val):
             ratio = float(d_val) / float(limit_hall)
-            ratio_clamped = max(min(ratio, 1.25), -1.25)
-            return y_mid - (ratio_clamped * half_height)
+            ratio_clamped = max(min(ratio, 1.0), -1.0) # 严格限幅在上下边框内，杜绝穿出画布
+            y = y_mid - (ratio_clamped * half_height)
+            return max(pad_top, min(pad_top + plot_height, y))
             
         # 速度/电流 0~1.0 全高 Y 坐标转换函数 (底部 0，顶部满量程)
         def ratio_to_y(ratio):
-            ratio_clamped = max(min(ratio, 1.2), -0.2)
-            return pad_top + plot_height - (ratio_clamped * plot_height)
+            ratio_clamped = max(min(ratio, 1.0), 0.0) # 严格限幅在底端到顶端
+            y = pad_top + plot_height - (ratio_clamped * plot_height)
+            return max(pad_top, min(pad_top + plot_height, y))
             
         # 计算当前窗口最新数据帧的平均高度 (用于实时更新中间横线数值)
         latest_avg_h = 0.0
@@ -702,7 +704,8 @@ class ModernPIDAnalyzerApp:
                                     prefix_str = prefix_bytes.decode('utf-8', errors='ignore')
                                     for line in prefix_str.split('\n'):
                                         line = line.strip()
-                                        if len(line) >= 3:
+                                        printable_chars = sum(1 for c in line if 32 <= ord(c) <= 126 or ord(c) in [9, 10, 13] or '\u4e00' <= c <= '\u9fff')
+                                        if len(line) >= 3 and (printable_chars / len(line)) > 0.85:
                                             self.log_message(f"Rx(Text): {line}", "info", is_stream=True)
                                             parsed = self.parse_text_line(line)
                                             if parsed:
@@ -723,6 +726,46 @@ class ModernPIDAnalyzerApp:
                                     del self.rx_raw_buffer[:FRAME_LEN]
                                     try:
                                         hdr, sys_step, sys_fault, max_diff, limit_hall, abs_h0, abs_h1, abs_h2, abs_h3, raw_h0, raw_h1, raw_h2, raw_h3, dh0, dh1, dh2, dh3, v0, v1, v2, v3, i0, i1, i2, i3, e0, e1, e2, e3, tl = struct.unpack('<2sBBHH4i4i4i4h4H4B2s', frame_data)
+                                        
+                                        # 【通信抗噪防线】物理合理性与电磁干扰误码拦截 (Glitch Guard)
+                                        is_valid_frame = True
+                                        
+                                        # 1. 状态码与故障码有效性 (单片机状态机 0~10)
+                                        if sys_step > 15 or sys_fault > 15:
+                                            is_valid_frame = False
+                                            
+                                        # 2. 4 轴位置绝对范围合法性 (正常行程 0~2000mm 对应 0~225000c，放宽到 -50000 ~ 500000 counts)
+                                        abs_halls_curr = [abs_h0, abs_h1, abs_h2, abs_h3]
+                                        for h in abs_halls_curr:
+                                            if h < -50000 or h > 500000:
+                                                is_valid_frame = False
+                                                break
+                                                
+                                        # 3. 4 轴单帧突变物理极限检查 (20ms 内电机 3000RPM 最大运动 ~250 counts，单帧跳变 > 3000 counts 判定为比特翻转野值)
+                                        if is_valid_frame and hasattr(self, 'last_valid_abs_halls') and self.last_valid_abs_halls is not None:
+                                            for m_idx in range(4):
+                                                if abs(abs_halls_curr[m_idx] - self.last_valid_abs_halls[m_idx]) > 3000:
+                                                    is_valid_frame = False
+                                                    break
+                                                    
+                                        # 4. 转速与电流物理范围合法性 (转速限在 4500 RPM 内，电流限在 15.0A 内)
+                                        speeds_curr = [v0, v1, v2, v3]
+                                        for spd in speeds_curr:
+                                            if abs(spd) > 4500:
+                                                is_valid_frame = False
+                                                break
+                                                
+                                        currents_curr = [i0 / 100.0, i1 / 100.0, i2 / 100.0, i3 / 100.0]
+                                        for cur in currents_curr:
+                                            if cur < 0.0 or cur > 15.0:
+                                                is_valid_frame = False
+                                                break
+                                                
+                                        if not is_valid_frame:
+                                            # 受串口长线电磁干扰破坏的异常误码帧，坚决剔除丢弃，杜绝拉爆示波器！
+                                            continue
+                                            
+                                        self.last_valid_abs_halls = abs_halls_curr
                                         
                                         if not self.has_printed_header_info:
                                             self.has_printed_header_info = True
@@ -801,7 +844,8 @@ class ModernPIDAnalyzerApp:
                                         lines = text_str.split('\n')
                                         for line in lines[:-1]:
                                             line = line.strip()
-                                            if len(line) >= 3:
+                                            printable_chars = sum(1 for c in line if 32 <= ord(c) <= 126 or ord(c) in [9, 10, 13] or '\u4e00' <= c <= '\u9fff')
+                                            if len(line) >= 3 and (printable_chars / len(line)) > 0.85:
                                                 self.log_message(f"Rx(Text): {line}", "info", is_stream=True)
                                                 parsed = self.parse_text_line(line)
                                                 if parsed:
